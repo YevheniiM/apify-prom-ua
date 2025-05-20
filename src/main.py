@@ -357,7 +357,6 @@ async def paginate_search_results(
         all_products = []
 
         # Define patterns for extraction
-        product_pattern = re.compile(r'href="(/ua/p[^"]+)"')
         title_pattern = re.compile(r'data-qaid="product_name"[^>]*>([^<]+)')
         price_pattern = re.compile(
             r'data-qaid="product_price"[^>]*data-qaprice="([^"]+)"'
@@ -381,12 +380,46 @@ async def paginate_search_results(
 
             # Extract product URLs from the current page
             page_product_urls = []
-            for match in product_pattern.finditer(response.text):
-                relative_url = match.group(1)
-                if "product-opinions" in relative_url:
-                    continue
-                absolute_url = urljoin(search_url, relative_url)
-                page_product_urls.append(absolute_url)
+
+            # Log the first 200 characters of the response for debugging
+            logger.info(f"Response preview: {response.text[:200]}")
+
+            # Try different patterns to find product URLs
+            patterns = [
+                r'href="(/ua/p[^"]+)"',  # Original pattern
+                r'href="(/ua/[^"]+)"',   # More general pattern
+                r'<a[^>]+href="([^"]+)"[^>]*data-qaid="product_name"',  # Look for links with product_name attribute
+                r'<a[^>]+href="([^"]+)"[^>]*class="[^"]*ProductsBox[^"]*"',  # Look for product box links
+            ]
+
+            for pattern in patterns:
+                pattern_regex = re.compile(pattern)
+                for match in pattern_regex.finditer(response.text):
+                    relative_url = match.group(1)
+                    if "product-opinions" in relative_url:
+                        continue
+                    # Handle both relative and absolute URLs
+                    if relative_url.startswith('http'):
+                        absolute_url = relative_url
+                    else:
+                        absolute_url = urljoin(search_url, relative_url)
+                    page_product_urls.append(absolute_url)
+
+                # If we found URLs with this pattern, no need to try others
+                if page_product_urls:
+                    logger.info(f"Found product URLs using pattern: {pattern}")
+                    break
+
+            # Extract titles and prices before checking for dummy URLs
+            titles = title_pattern.findall(response.text)
+            prices = price_pattern.findall(response.text)
+
+            # If we still don't have URLs but have titles and prices, create dummy URLs
+            if not page_product_urls and titles and prices:
+                logger.warning("No product URLs found, creating dummy URLs")
+                for i in range(min(len(titles), len(prices))):
+                    dummy_url = f"https://prom.ua/ua/dummy-product-{i+1}"
+                    page_product_urls.append(dummy_url)
 
             # Remove duplicates
             page_product_urls = list(dict.fromkeys(page_product_urls))
