@@ -4,7 +4,7 @@ Pydantic models for product data.
 This module defines the data models for products extracted from Prom.ua.
 """
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 
@@ -15,14 +15,20 @@ class Product(BaseModel):
     Attributes:
         url: The URL of the product page
         title: The title/name of the product
-        price_uah: The price in Ukrainian hryvnia (UAH)
+        regular_price_uah: The regular price in Ukrainian hryvnia (UAH)
+        discounted_price_uah: The discounted price in Ukrainian hryvnia (UAH), if available
+        price_uah: The current price in Ukrainian hryvnia (UAH) - kept for backward compatibility
         currency: The currency code (usually UAH)
+        image_url: The URL of the main product image
     """
 
     url: str = Field(..., description="Product page URL")
     title: Optional[str] = Field(None, description="Product title/name")
-    price_uah: Optional[float] = Field(None, description="Price in UAH")
+    regular_price_uah: Optional[float] = Field(None, description="Regular price in UAH")
+    discounted_price_uah: Optional[float] = Field(None, description="Discounted price in UAH, if available")
+    price_uah: Optional[float] = Field(None, description="Current price in UAH (for backward compatibility)")
     currency: Optional[str] = Field(None, description="Currency code (usually UAH)")
+    image_url: Optional[str] = Field(None, description="URL of the main product image")
 
     # Model configuration
     model_config = ConfigDict(
@@ -32,7 +38,7 @@ class Product(BaseModel):
         }
     )
 
-    @field_validator("price_uah")
+    @field_validator("price_uah", "regular_price_uah", "discounted_price_uah")
     def validate_price(cls, v: Optional[float]) -> Optional[float]:
         """Validate that price is a positive number if present."""
         if v is not None and v < 0:

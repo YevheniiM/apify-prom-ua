@@ -6,11 +6,10 @@ This module handles crawling product pages and extracting product data.
 
 import re
 import json
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional
 
 import httpx
 from loguru import logger
-from apify import Actor
 
 from src.config import JSONLD_REGEX
 from src.utils.http import fetch_html
@@ -100,7 +99,9 @@ class ProductCrawler:
         title = jsonld_data.get("name")
 
         # Extract price information
-        price = None
+        regular_price = None
+        discounted_price = None
+        current_price = None
         currency = None
 
         # Handle different offer structures
@@ -108,43 +109,123 @@ class ProductCrawler:
 
         # Case 1: offers is a dictionary
         if isinstance(offers, dict):
-            price = offers.get("price")
+            current_price = offers.get("price")
             currency = offers.get("priceCurrency")
+
+            # Check for price specification with multiple prices
+            price_specification = offers.get("priceSpecification", [])
+            if isinstance(price_specification, list) and price_specification:
+                for spec in price_specification:
+                    if isinstance(spec, dict):
+                        price_type = spec.get("valueAddedTaxIncluded", True)
+                        if price_type:
+                            # This is the regular price
+                            regular_price = spec.get("price")
+                        else:
+                            # This might be a discounted price
+                            discounted_price = spec.get("price")
+
+            # Check for high and low prices
+            high_price = offers.get("highPrice")
+            low_price = offers.get("lowPrice")
+            if high_price and low_price:
+                regular_price = high_price
+                discounted_price = low_price
 
         # Case 2: offers is a list
         elif isinstance(offers, list) and offers:
             # Take the first offer
             first_offer = offers[0]
             if isinstance(first_offer, dict):
-                price = first_offer.get("price")
+                current_price = first_offer.get("price")
                 currency = first_offer.get("priceCurrency")
 
-        # Convert price to float if present
-        if price is not None:
-            try:
-                # Handle price as string with commas or spaces
-                if isinstance(price, str):
-                    price = price.replace(',', '.').replace(' ', '')
-                price = float(price)
-            except (ValueError, TypeError):
-                logger.warning(f"Could not convert price to float: {price}")
-                price = None
+                # Check for price specification
+                price_specification = first_offer.get("priceSpecification", [])
+                if isinstance(price_specification, list) and price_specification:
+                    for spec in price_specification:
+                        if isinstance(spec, dict):
+                            price_type = spec.get("valueAddedTaxIncluded", True)
+                            if price_type:
+                                regular_price = spec.get("price")
+                            else:
+                                discounted_price = spec.get("price")
+
+        # Convert prices to float if present
+        for price_var, price_val in [
+            ("current_price", current_price),
+            ("regular_price", regular_price),
+            ("discounted_price", discounted_price)
+        ]:
+            if price_val is not None:
+                try:
+                    # Handle price as string with commas or spaces
+                    if isinstance(price_val, str):
+                        price_val = price_val.replace(',', '.').replace(' ', '')
+                    price_val = float(price_val)
+
+                    # Update the variable
+                    if price_var == "current_price":
+                        current_price = price_val
+                    elif price_var == "regular_price":
+                        regular_price = price_val
+                    elif price_var == "discounted_price":
+                        discounted_price = price_val
+
+                except (ValueError, TypeError):
+                    logger.warning(f"Could not convert {price_var} to float: {price_val}")
+                    if price_var == "current_price":
+                        current_price = None
+                    elif price_var == "regular_price":
+                        regular_price = None
+                    elif price_var == "discounted_price":
+                        discounted_price = None
+
+        # If we only have current_price but not regular_price, use current_price as regular_price
+        if regular_price is None and current_price is not None:
+            regular_price = current_price
+
+        # If we have both regular_price and discounted_price, use discounted_price as current_price
+        if regular_price is not None and discounted_price is not None:
+            current_price = discounted_price
+        # If we only have regular_price, use it as current_price
+        elif regular_price is not None and current_price is None:
+            current_price = regular_price
 
         # Default currency to UAH if not specified
-        if not currency and price is not None:
+        if not currency and (current_price is not None or regular_price is not None or discounted_price is not None):
             currency = "UAH"
+
+        # Extract image URL
+        image_url = None
+        if "image" in jsonld_data:
+            # Handle both string and array image formats
+            image_data = jsonld_data.get("image")
+            if isinstance(image_data, str):
+                image_url = image_data
+            elif isinstance(image_data, list) and image_data:
+                # Take the first image
+                image_url = image_data[0] if isinstance(image_data[0], str) else None
+            elif isinstance(image_data, dict) and "url" in image_data:
+                # Handle ImageObject format
+                image_url = image_data.get("url")
 
         # Create and return Product object
         product = Product(
             url=url,
             title=title,
-            price_uah=price,
+            price_uah=current_price,  # For backward compatibility
+            regular_price_uah=regular_price,
+            discounted_price_uah=discounted_price,
             currency=currency,
+            image_url=image_url,
         )
 
         logger.info(
             f"Extracted product: {title} | "
-            f"Price: {price} {currency} | URL: {url}"
+            f"Price: {current_price} {currency} | "
+            f"Regular: {regular_price} | Discounted: {discounted_price} | "
+            f"Image: {image_url} | URL: {url}"
         )
 
         return product
@@ -170,29 +251,76 @@ class ProductCrawler:
             if title:
                 title = re.sub(r'<[^>]+>', '', title)
 
-            # Extract price
-            # Look for price in various formats
-            price_patterns = [
+            # Extract prices
+            # Look for current price in various formats
+            current_price_patterns = [
                 r'data-qaid="product_price"[^>]*>([\d\s,.]+)</span>',  # Standard price
-                r'class="[^"]*ProductPrice[^"]*"[^>]*>([\d\s,.]+)</span>',  # Alternative format
+                r'class="[^"]*ProductPrice[^"]*"[^>]*>([\d\s,.]+)</span>',  # Alternative
                 r'itemprop="price"[^>]*content="([\d.]+)"',  # Microdata format
             ]
 
-            price = None
-            for pattern in price_patterns:
+            # Look for regular price (often shown as crossed-out)
+            regular_price_patterns = [
+                r'data-qaid="product_old_price"[^>]*>([\d\s,.]+)</span>',  # Old price
+                r'class="[^"]*OldPrice[^"]*"[^>]*>([\d\s,.]+)</span>',  # Alternative
+                r'class="[^"]*crossed[^"]*"[^>]*>([\d\s,.]+)</span>',  # Crossed out
+            ]
+
+            # Extract current price
+            current_price = None
+            for pattern in current_price_patterns:
                 price_match = re.search(pattern, html)
                 if price_match:
                     price_str = price_match.group(1).strip()
                     # Clean up price string
                     price_str = price_str.replace(' ', '').replace(',', '.')
                     try:
-                        price = float(price_str)
+                        current_price = float(price_str)
                         break
                     except ValueError:
                         continue
 
+            # Extract regular price
+            regular_price = None
+            for pattern in regular_price_patterns:
+                price_match = re.search(pattern, html)
+                if price_match:
+                    price_str = price_match.group(1).strip()
+                    # Clean up price string
+                    price_str = price_str.replace(' ', '').replace(',', '.')
+                    try:
+                        regular_price = float(price_str)
+                        break
+                    except ValueError:
+                        continue
+
+            # If we have current_price but not regular_price, use current_price as regular_price
+            if regular_price is None and current_price is not None:
+                regular_price = current_price
+                discounted_price = None
+            # If we have both, current_price is the discounted price
+            elif regular_price is not None and current_price is not None and regular_price > current_price:
+                discounted_price = current_price
+            else:
+                discounted_price = None
+
+            # Extract image URL
+            image_url = None
+            image_patterns = [
+                r'<meta\s+property="og:image"\s+content="([^"]+)"',  # Open Graph image
+                r'<img[^>]+data-qaid="product_image"[^>]+src="([^"]+)"',  # Product image
+                r'<img[^>]+class="[^"]*ProductImage[^"]*"[^>]+src="([^"]+)"',  # Alternative
+                r'<img[^>]+itemprop="image"[^>]+src="([^"]+)"',  # Microdata image
+            ]
+
+            for pattern in image_patterns:
+                image_match = re.search(pattern, html)
+                if image_match:
+                    image_url = image_match.group(1).strip()
+                    break
+
             # If we couldn't extract the data, return None
-            if not title and not price:
+            if not title and not current_price:
                 logger.warning(f"Could not extract product data from HTML: {url}")
                 return None
 
@@ -200,13 +328,18 @@ class ProductCrawler:
             product = Product(
                 url=url,
                 title=title,
-                price_uah=price,
+                price_uah=current_price,  # For backward compatibility
+                regular_price_uah=regular_price,
+                discounted_price_uah=discounted_price,
                 currency="UAH",  # Default currency for Prom.ua
+                image_url=image_url,
             )
 
             logger.info(
                 f"Extracted product from HTML: {title} | "
-                f"Price: {price} UAH | URL: {url}"
+                f"Price: {current_price} UAH | "
+                f"Regular: {regular_price} | Discounted: {discounted_price} | "
+                f"Image: {image_url} | URL: {url}"
             )
 
             return product

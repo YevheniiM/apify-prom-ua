@@ -379,80 +379,46 @@ async def paginate_search_results(
                 follow_redirects=True
             )
 
-            # Extract product URLs from the current page
+            # Extract product URLs from the current page using BeautifulSoup
+            # This is a more robust approach than using regex patterns
             page_product_urls = []
 
-            # Log the first 200 characters of the response for debugging
-            logger.info(f"Response preview: {response.text[:200]}")
+            # Parse the HTML with BeautifulSoup
+            html_soup = BeautifulSoup(response.text, 'html.parser')
 
-            # Try different patterns to find product URLs
-            patterns = [
-                r'href="(/ua/p[^"]+)"',  # Original pattern
-                r'href="(/ua/[^"]+)"',   # More general pattern
-                r'<a[^>]+href="([^"]+)"[^>]*data-qaid="product_name"',  # Look for links with product_name attribute
-                r'<a[^>]+href="([^"]+)"[^>]*class="[^"]*ProductsBox[^"]*"',  # Look for product box links
-            ]
+            # Find all links on the page
+            all_links = html_soup.find_all('a', href=True)
 
-            for pattern in patterns:
-                pattern_regex = re.compile(pattern)
-                for match in pattern_regex.finditer(response.text):
-                    relative_url = match.group(1)
-                    if "product-opinions" in relative_url:
-                        continue
-                    # Handle both relative and absolute URLs
-                    if relative_url.startswith('http'):
-                        absolute_url = relative_url
+            # Filter for potential product links
+            for link in all_links:
+                href = link.get('href', '')
+                # Check if it looks like a product link
+                if '/ua/' in href and not any(x in href for x in [
+                    'search', 'category', 'login', 'register', 'cart', 'checkout'
+                ]):
+                    # Convert relative URLs to absolute
+                    if href.startswith('http'):
+                        absolute_url = href
                     else:
-                        absolute_url = urljoin(search_url, relative_url)
+                        absolute_url = urljoin(search_url, href)
                     page_product_urls.append(absolute_url)
-
-                # If we found URLs with this pattern, no need to try others
-                if page_product_urls:
-                    logger.info(f"Found product URLs using pattern: {pattern}")
-                    break
 
             # Extract titles and prices
             titles = title_pattern.findall(response.text)
             prices = price_pattern.findall(response.text)
 
-            # If we couldn't find product URLs but found titles and prices,
-            # log a warning and try a more aggressive approach
-            if not page_product_urls and titles and prices:
-                logger.warning(
-                    "No product URLs found with standard patterns. "
-                    "Attempting more aggressive HTML parsing."
+            # If we couldn't find any product URLs, log an error
+            if not page_product_urls:
+                logger.error(
+                    "Failed to extract product URLs. "
+                    "Site structure may have changed."
                 )
+                # Save a sample of the HTML for debugging
+                with open(f"debug_html_page_{current_page}.html", "w") as f:
+                    f.write(response.text[:10000])  # Save first 10K chars
 
-                # Try to extract any links that might be product links
-                # Look for links near product titles or prices
-                html_soup = BeautifulSoup(response.text, 'html.parser')
-
-                # Find all links on the page
-                all_links = html_soup.find_all('a', href=True)
-
-                # Filter for potential product links
-                for link in all_links:
-                    href = link.get('href', '')
-                    # Check if it looks like a product link
-                    if '/ua/' in href and not any(x in href for x in ['search', 'category', 'login', 'register']):
-                        # Convert relative URLs to absolute
-                        if href.startswith('http'):
-                            absolute_url = href
-                        else:
-                            absolute_url = urljoin(search_url, href)
-                        page_product_urls.append(absolute_url)
-
-                if not page_product_urls:
-                    logger.error(
-                        "Failed to extract product URLs even with aggressive parsing. "
-                        "Site structure may have changed. Check HTML response."
-                    )
-                    # Save a sample of the HTML for debugging
-                    with open(f"debug_html_page_{current_page}.html", "w") as f:
-                        f.write(response.text[:10000])  # Save first 10K chars
-
-                    # Skip this page and try the next one
-                    continue
+                # Skip this page and try the next one
+                continue
 
             # Remove duplicates
             page_product_urls = list(dict.fromkeys(page_product_urls))
