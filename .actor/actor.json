@@ -1,0 +1,12 @@
+{
+  "actorSpecification": 1,
+  "name": "promua_search_crawler",
+  "title": "Prom.ua Search Crawler",
+  "description": "Crawls search results from Prom.ua and extracts product information",
+  "version": "1.0.0",
+  "dockerfile": "./Dockerfile",
+  "meta": {
+    "templateId": "python-start"
+  },
+  "input": "./input_schema.json"
+}

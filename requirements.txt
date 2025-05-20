@@ -1,0 +1,12 @@
+# requirements.txt  –  pinned on 2025-05-18
+apify==2.5.0
+httpx[http2]==0.28.1
+tenacity==9.1.2
+loguru==0.7.3
+pydantic==2.11.1  # Using v2 as required by Apify SDK
+pytest==8.3.5
+pytest-asyncio==0.26.0
+ruff==0.11.10
+black==25.1.0
+mypy==1.15.0
+types-requests==2.32.0.20250515

@@ -1,0 +1,22 @@
+{
+  "title": "Prom.ua Search Crawler Input",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "search_term": {
+      "title": "Search term",
+      "type": "string",
+      "description": "The search term to use for finding products on Prom.ua",
+      "editor": "textfield"
+    },
+    "max_items": {
+      "title": "Max products",
+      "type": "integer",
+      "description": "Maximum number of products to extract",
+      "minimum": 1,
+      "default": 10,
+      "editor": "number"
+    }
+  },
+  "required": ["search_term"]
+}
