@@ -61,6 +61,15 @@ The actor outputs product data to the default dataset in the following format:
 
 ## Development
 
+### Git Workflow
+
+This project follows a structured Git workflow:
+
+1. All development happens on the `develop` branch
+2. Pull requests are created from `develop` to `master` for releases
+3. CI/CD pipeline runs tests and linting on all pull requests
+4. The `master` branch contains production-ready code
+
 ### Project Structure
 
 - `src/` - Source code
