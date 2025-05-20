@@ -16,6 +16,7 @@ from urllib.parse import urljoin
 import httpx
 from loguru import logger
 from apify import Actor
+from bs4 import BeautifulSoup
 
 from src.config import (
     PROXY_CONFIG,
@@ -410,16 +411,48 @@ async def paginate_search_results(
                     logger.info(f"Found product URLs using pattern: {pattern}")
                     break
 
-            # Extract titles and prices before checking for dummy URLs
+            # Extract titles and prices
             titles = title_pattern.findall(response.text)
             prices = price_pattern.findall(response.text)
 
-            # If we still don't have URLs but have titles and prices, create dummy URLs
+            # If we couldn't find product URLs but found titles and prices,
+            # log a warning and try a more aggressive approach
             if not page_product_urls and titles and prices:
-                logger.warning("No product URLs found, creating dummy URLs")
-                for i in range(min(len(titles), len(prices))):
-                    dummy_url = f"https://prom.ua/ua/dummy-product-{i+1}"
-                    page_product_urls.append(dummy_url)
+                logger.warning(
+                    "No product URLs found with standard patterns. "
+                    "Attempting more aggressive HTML parsing."
+                )
+
+                # Try to extract any links that might be product links
+                # Look for links near product titles or prices
+                html_soup = BeautifulSoup(response.text, 'html.parser')
+
+                # Find all links on the page
+                all_links = html_soup.find_all('a', href=True)
+
+                # Filter for potential product links
+                for link in all_links:
+                    href = link.get('href', '')
+                    # Check if it looks like a product link
+                    if '/ua/' in href and not any(x in href for x in ['search', 'category', 'login', 'register']):
+                        # Convert relative URLs to absolute
+                        if href.startswith('http'):
+                            absolute_url = href
+                        else:
+                            absolute_url = urljoin(search_url, href)
+                        page_product_urls.append(absolute_url)
+
+                if not page_product_urls:
+                    logger.error(
+                        "Failed to extract product URLs even with aggressive parsing. "
+                        "Site structure may have changed. Check HTML response."
+                    )
+                    # Save a sample of the HTML for debugging
+                    with open(f"debug_html_page_{current_page}.html", "w") as f:
+                        f.write(response.text[:10000])  # Save first 10K chars
+
+                    # Skip this page and try the next one
+                    continue
 
             # Remove duplicates
             page_product_urls = list(dict.fromkeys(page_product_urls))
