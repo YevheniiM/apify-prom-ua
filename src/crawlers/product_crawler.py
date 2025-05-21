@@ -113,6 +113,89 @@ class ProductCrawler:
         # By default, assume it's a product page
         return False
 
+    async def extract_prices_from_html(self, html: str) -> dict:
+        """
+        Extract price information from HTML.
+
+        Args:
+            html: The HTML content of the product page
+
+        Returns:
+            Dictionary with current_price, regular_price, and discounted_price
+        """
+        current_price = None
+        regular_price = None
+        discounted_price = None
+
+        # Look for current price in various formats
+        current_price_patterns = [
+            r'data-qaid="product_price"[^>]*data-qaprice="([\d\s,.]+)"',  # Data attribute
+            r'data-qaid="product_price"[^>]*>([\d\s,.]+)[^<]*</span>',  # Standard price
+            r'data-qaid="product_price"[^>]*>.*?<span[^>]*>([\d\s,.]+)[^<]*</span>',  # Nested
+            r'class="[^"]*ProductPrice[^"]*"[^>]*>([\d\s,.]+)[^<]*</span>',  # Alternative
+            r'itemprop="price"[^>]*content="([\d.,]+)"',  # Microdata format
+        ]
+
+        # Look for regular/old price (often shown as crossed-out)
+        regular_price_patterns = [
+            r'data-qaid="old_price"[^>]*data-qaprice="([\d\s,.]+)"',  # Data attribute
+            r'data-qaid="old_price"[^>]*>([\d\s,.]+)[^<]*</span>',  # Old price
+            r'data-qaid="product_old_price"[^>]*>([\d\s,.]+)[^<]*</span>',  # Old price
+            r'class="[^"]*OldPrice[^"]*"[^>]*>([\d\s,.]+)[^<]*</span>',  # Alternative
+            r'class="[^"]*crossed[^"]*"[^>]*>([\d\s,.]+)[^<]*</span>',  # Crossed out
+        ]
+
+        # Extract current price
+        for pattern in current_price_patterns:
+            price_match = re.search(pattern, html)
+            if price_match:
+                price_str = price_match.group(1).strip()
+                # Clean up price string
+                price_str = price_str.replace(' ', '').replace(',', '.')
+                try:
+                    current_price = float(price_str)
+                    logger.debug(f"Extracted current price from HTML: {current_price}")
+                    break
+                except ValueError:
+                    continue
+
+        # Extract regular price
+        for pattern in regular_price_patterns:
+            price_match = re.search(pattern, html)
+            if price_match:
+                price_str = price_match.group(1).strip()
+                # Clean up price string
+                price_str = price_str.replace(' ', '').replace(',', '.')
+                try:
+                    regular_price = float(price_str)
+                    logger.debug(f"Extracted regular price from HTML: {regular_price}")
+                    break
+                except ValueError:
+                    continue
+
+        # Determine discounted price
+        if regular_price is not None and current_price is not None:
+            if regular_price > current_price:
+                discounted_price = current_price
+                logger.debug(
+                    f"Detected discount from HTML: regular={regular_price}, "
+                    f"discounted={discounted_price}"
+                )
+            else:
+                # If regular <= current, something might be wrong with our extraction
+                logger.debug(
+                    f"Regular price ({regular_price}) <= current price ({current_price}), "
+                    f"assuming no discount"
+                )
+                regular_price = current_price
+                discounted_price = None
+
+        return {
+            "current_price": current_price,
+            "regular_price": regular_price,
+            "discounted_price": discounted_price
+        }
+
     async def extract_product_data(
         self, html: str, url: str
     ) -> Optional[Product]:
@@ -133,17 +216,19 @@ class ProductCrawler:
 
         # Extract JSON-LD data
         jsonld_data = await self.extract_jsonld_data(html)
+
+        # Also extract price information from HTML to ensure we get both regular and discounted prices
+        html_prices = await self.extract_prices_from_html(html)
+
         if not jsonld_data:
             # If JSON-LD extraction fails, try to extract data from HTML directly
             return await self.extract_data_from_html(html, url)
 
-        # Extract basic product information
+        # Extract basic product information from JSON-LD
         title = jsonld_data.get("name")
 
-        # Extract price information
-        regular_price = None
-        discounted_price = None
-        current_price = None
+        # Extract price information from JSON-LD
+        jsonld_price = None
         currency = None
 
         # Handle different offer structures
@@ -151,94 +236,61 @@ class ProductCrawler:
 
         # Case 1: offers is a dictionary
         if isinstance(offers, dict):
-            current_price = offers.get("price")
+            jsonld_price = offers.get("price")
             currency = offers.get("priceCurrency")
-
-            # Check for price specification with multiple prices
-            price_specification = offers.get("priceSpecification", [])
-            if isinstance(price_specification, list) and price_specification:
-                for spec in price_specification:
-                    if isinstance(spec, dict):
-                        price_type = spec.get("valueAddedTaxIncluded", True)
-                        if price_type:
-                            # This is the regular price
-                            regular_price = spec.get("price")
-                        else:
-                            # This might be a discounted price
-                            discounted_price = spec.get("price")
-
-            # Check for high and low prices
-            high_price = offers.get("highPrice")
-            low_price = offers.get("lowPrice")
-            if high_price and low_price:
-                regular_price = high_price
-                discounted_price = low_price
-
         # Case 2: offers is a list
         elif isinstance(offers, list) and offers:
             # Take the first offer
             first_offer = offers[0]
             if isinstance(first_offer, dict):
-                current_price = first_offer.get("price")
+                jsonld_price = first_offer.get("price")
                 currency = first_offer.get("priceCurrency")
 
-                # Check for price specification
-                price_specification = first_offer.get("priceSpecification", [])
-                if isinstance(price_specification, list) and price_specification:
-                    for spec in price_specification:
-                        if isinstance(spec, dict):
-                            price_type = spec.get("valueAddedTaxIncluded", True)
-                            if price_type:
-                                regular_price = spec.get("price")
-                            else:
-                                discounted_price = spec.get("price")
+        # Convert JSON-LD price to float if present
+        if jsonld_price is not None:
+            try:
+                if isinstance(jsonld_price, str):
+                    jsonld_price = jsonld_price.replace(',', '.').replace(' ', '')
+                jsonld_price = float(jsonld_price)
+            except (ValueError, TypeError):
+                logger.warning(f"Could not convert JSON-LD price to float: {jsonld_price}")
+                jsonld_price = None
 
-        # Convert prices to float if present
-        for price_var, price_val in [
-            ("current_price", current_price),
-            ("regular_price", regular_price),
-            ("discounted_price", discounted_price)
-        ]:
-            if price_val is not None:
-                try:
-                    # Handle price as string with commas or spaces
-                    if isinstance(price_val, str):
-                        price_val = price_val.replace(',', '.').replace(' ', '')
-                    price_val = float(price_val)
+        # Combine JSON-LD and HTML price information
+        html_regular_price = html_prices.get("regular_price")
+        html_current_price = html_prices.get("current_price")
 
-                    # Update the variable
-                    if price_var == "current_price":
-                        current_price = price_val
-                    elif price_var == "regular_price":
-                        regular_price = price_val
-                    elif price_var == "discounted_price":
-                        discounted_price = price_val
+        # For the regular price, prioritize JSON-LD data
+        if jsonld_price is not None:
+            regular_price = jsonld_price
+            # When we have JSON-LD data, we should trust it for determining if there's a discount
+            # Only set discounted_price if JSON-LD explicitly indicates a discount
+            # This is the most reliable approach for production use
+            discounted_price = None
 
-                except (ValueError, TypeError):
-                    logger.warning(f"Could not convert {price_var} to float: {price_val}")
-                    if price_var == "current_price":
-                        current_price = None
-                    elif price_var == "regular_price":
-                        regular_price = None
-                    elif price_var == "discounted_price":
-                        discounted_price = None
+            # We could check for discounts in JSON-LD here if the schema supported it
+            # For now, we're assuming no discount when we have JSON-LD price data
+        else:
+            # If no JSON-LD data, fall back to HTML extraction
+            regular_price = html_regular_price
+            discounted_price = None
 
-        # If we only have current_price but not regular_price, use current_price as regular_price
-        if regular_price is None and current_price is not None:
-            regular_price = current_price
-
-        # If we have both regular_price and discounted_price, use discounted_price as current_price
-        if regular_price is not None and discounted_price is not None:
-            current_price = discounted_price
-        # If we only have regular_price, use it as current_price
-        elif regular_price is not None and current_price is None:
-            current_price = regular_price
+            # Check if HTML extraction found a valid discount
+            if html_regular_price is not None and html_current_price is not None and html_regular_price > html_current_price:
+                # Only use HTML discounted price if it's significantly different from the regular price
+                # (to avoid false discounts due to rounding or small differences)
+                if html_regular_price > html_current_price * 1.01:  # At least 1% difference
+                    discounted_price = html_current_price
+                    logger.debug(
+                        f"HTML indicates discount: regular={html_regular_price}, "
+                        f"discounted={html_current_price}"
+                    )
 
         # Default currency to UAH if not specified
-        if not currency and (current_price is not None or regular_price is not None or discounted_price is not None):
+        if not currency:
             currency = "UAH"
 
-        # Extract image URL
+        # Extract image URL from JSON-LD
         image_url = None
         if "image" in jsonld_data:
             # Handle both string and array image formats
@@ -252,46 +304,35 @@ class ProductCrawler:
                 # Handle ImageObject format
                 image_url = image_data.get("url")
 
-        # Extract seller information
+        # Extract seller information from JSON-LD
         seller_name = None
         seller_url = None
-        offers = jsonld_data.get("offers", {})
         if isinstance(offers, dict) and "seller" in offers:
             seller = offers.get("seller", {})
             if isinstance(seller, dict):
                 seller_name = seller.get("name")
                 # Try to extract seller URL from JSON-LD
                 seller_url = seller.get("url")
-                if seller_url:
-                    logger.debug(f"Extracted seller URL from JSON-LD: {seller_url}")
-                    # Make sure it's an absolute URL
-                    if not seller_url.startswith('http'):
-                        if seller_url.startswith('/'):
-                            seller_url = f"https://prom.ua{seller_url}"
-                        else:
-                            seller_url = f"https://prom.ua/{seller_url}"
-                        logger.debug(f"Converted to absolute URL: {seller_url}")
+                if seller_url and not seller_url.startswith('http'):
+                    if seller_url.startswith('/'):
+                        seller_url = f"https://prom.ua{seller_url}"
+                    else:
+                        seller_url = f"https://prom.ua/{seller_url}"
 
-        # Extract availability status as a boolean
+        # Extract availability status as a boolean from JSON-LD
         in_stock = None
         if isinstance(offers, dict) and "availability" in offers:
             availability = offers.get("availability", "")
             # Convert schema.org availability to boolean
             if "InStock" in availability:
                 in_stock = True
-            elif "OutOfStock" in availability:
-                in_stock = False
-            elif "PreOrder" in availability:
-                in_stock = False  # PreOrder means not currently in stock
             else:
-                # Default to False for unknown availability
                 in_stock = False
 
         # Create and return Product object
         product = Product(
             url=url,
             title=title,
-            price_uah=current_price,  # For backward compatibility
             regular_price_uah=regular_price,
             discounted_price_uah=discounted_price,
             currency=currency,
@@ -303,7 +344,6 @@ class ProductCrawler:
 
         logger.info(
             f"Extracted product: {title} | "
-            f"Price: {current_price} {currency} | "
             f"Regular: {regular_price} | Discounted: {discounted_price} | "
             f"Image: {image_url} | "
             f"Seller: {seller_name} | "
@@ -543,7 +583,6 @@ class ProductCrawler:
             product = Product(
                 url=url,
                 title=title,
-                price_uah=current_price,  # For backward compatibility
                 regular_price_uah=regular_price,
                 discounted_price_uah=discounted_price,
                 currency="UAH",  # Default currency for Prom.ua
