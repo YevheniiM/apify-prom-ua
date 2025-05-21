@@ -260,31 +260,48 @@ class ProductCrawler:
         html_regular_price = html_prices.get("regular_price")
         html_current_price = html_prices.get("current_price")
 
-        # For the regular price, prioritize JSON-LD data
-        if jsonld_price is not None:
-            regular_price = jsonld_price
-            # When we have JSON-LD data, we should trust it for determining if there's a discount
-            # Only set discounted_price if JSON-LD explicitly indicates a discount
-            # This is the most reliable approach for production use
-            discounted_price = None
+        # For price information, we need to combine JSON-LD and HTML data
+        # First, check if HTML indicates a discount
+        html_has_discount = (
+            html_regular_price is not None and
+            html_current_price is not None and
+            html_regular_price > html_current_price * 1.01  # At least 1% difference
+        )
 
-            # We could check for discounts in JSON-LD here if the schema supported it
-            # For now, we're assuming no discount when we have JSON-LD price data
-        else:
-            # If no JSON-LD data, fall back to HTML extraction
+        # For the regular price, always prioritize JSON-LD data if available
+        # This is the most reliable approach for production use
+        if jsonld_price is not None:
+            # If we have JSON-LD price data, use it as the source of truth for regular price
+            regular_price = jsonld_price
+            logger.debug(f"Using JSON-LD price as regular price: {regular_price}")
+
+            # For discounted price, check if HTML indicates a discount
+            # and the current price is significantly lower than the JSON-LD price
+            if (html_current_price is not None and
+                jsonld_price > html_current_price * 1.01):  # At least 1% difference
+                discounted_price = html_current_price
+                logger.debug(
+                    f"Using HTML current price as discounted price: {discounted_price}"
+                )
+            else:
+                discounted_price = None
+        elif html_has_discount:
+            # If no JSON-LD but HTML shows a discount, use HTML data
+            regular_price = html_regular_price
+            discounted_price = html_current_price
+            logger.debug(
+                f"HTML indicates discount: regular={html_regular_price}, "
+                f"discounted={html_current_price}"
+            )
+        elif html_regular_price is not None:
+            # If no JSON-LD price and no HTML discount, fall back to HTML regular price
             regular_price = html_regular_price
             discounted_price = None
-
-            # Check if HTML extraction found a valid discount
-            if html_regular_price is not None and html_current_price is not None and html_regular_price > html_current_price:
-                # Only use HTML discounted price if it's significantly different from the regular price
-                # (to avoid false discounts due to rounding or small differences)
-                if html_regular_price > html_current_price * 1.01:  # At least 1% difference
-                    discounted_price = html_current_price
-                    logger.debug(
-                        f"HTML indicates discount: regular={html_regular_price}, "
-                        f"discounted={html_current_price}"
-                    )
+            logger.debug(f"Using HTML regular price: {regular_price}")
+        else:
+            # If neither is available, we have no regular price
+            regular_price = None
+            discounted_price = None
 
         # Default currency to UAH if not specified
         if not currency:
