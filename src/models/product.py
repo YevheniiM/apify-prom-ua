@@ -62,4 +62,13 @@ class Product(BaseModel):
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert the model to a dictionary for dataset storage."""
-        return self.model_dump(exclude_none=True)
+        # Create a dictionary with all fields, even if they're None
+        data = self.model_dump(exclude_none=False)
+
+        # Ensure seller information is included
+        if 'seller_name' not in data or data['seller_name'] is None:
+            data['seller_name'] = None
+        if 'seller_url' not in data or data['seller_url'] is None:
+            data['seller_url'] = None
+
+        return data

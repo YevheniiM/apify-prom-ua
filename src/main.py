@@ -10,6 +10,7 @@ import uuid
 import sys
 import re
 import random
+import argparse
 from typing import Dict, Any, List
 from urllib.parse import urljoin
 
@@ -394,14 +395,22 @@ async def paginate_search_results(
                 href = link.get('href', '')
                 # Check if it looks like a product link
                 if '/ua/' in href and not any(x in href for x in [
-                    'search', 'category', 'login', 'register', 'cart', 'checkout'
+                    'search', 'category', 'login', 'register', 'cart', 'checkout',
+                    'shipments', 'profile', 'account', 'feedback', 'help', 'support',
+                    'contact', 'about', 'terms', 'privacy', 'faq', 'blog', 'news'
                 ]):
                     # Convert relative URLs to absolute
                     if href.startswith('http'):
                         absolute_url = href
                     else:
                         absolute_url = urljoin(search_url, href)
-                    page_product_urls.append(absolute_url)
+
+                    # Additional validation to ensure it's a product URL
+                    # Prom.ua product URLs typically have a pattern like /ua/p12345-product-name
+                    if '/ua/p' in absolute_url or '/ua/product_' in absolute_url:
+                        page_product_urls.append(absolute_url)
+                    else:
+                        logger.debug(f"Skipping non-product URL: {absolute_url}")
 
             # Extract titles and prices
             titles = title_pattern.findall(response.text)
@@ -546,11 +555,18 @@ async def main() -> None:
         # Validate input
         search_term = actor_input.get("search_term")
         max_items = actor_input.get("max_items", 10)
+        debug_mode = actor_input.get("debug_mode", False)
 
         if not search_term:
             raise ValueError("search_term is required")
 
-        logger.info(f"Starting crawl for: '{search_term}', max items: {max_items}")
+        # Configure logging based on debug mode
+        if debug_mode:
+            logger.remove()
+            logger.add(sys.stderr, level="DEBUG")
+            logger.debug("Debug mode enabled")
+
+        logger.info(f"Starting crawl for: '{search_term}', max items: {max_items}, debug mode: {debug_mode}")
 
         # Set up HTTP client
         async with await setup_http_client() as client:

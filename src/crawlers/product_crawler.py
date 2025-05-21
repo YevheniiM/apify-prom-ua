@@ -76,6 +76,43 @@ class ProductCrawler:
         logger.warning("No JSON-LD Product data found in HTML")
         return None
 
+    def is_non_product_page(self, html: str, url: str) -> bool:
+        """
+        Check if the page is not a product page.
+
+        Args:
+            html: The HTML content of the page
+            url: The URL of the page
+
+        Returns:
+            True if the page is not a product page, False otherwise
+        """
+        # Only filter out very specific non-product pages
+
+        # Check for tracking page (very specific text)
+        if "введи номер телефону для відстеження замовлення" in html.lower():
+            logger.debug(f"Detected tracking page: {url}")
+            return True
+
+        # Check for specific non-product URLs
+        if "/shipments" in url:
+            logger.debug(f"Detected shipments page: {url}")
+            return True
+
+        # For product URLs, they should contain /p followed by numbers
+        # But we'll only use this as a positive indicator, not to filter out
+        if "/ua/p" in url and any(c.isdigit() for c in url):
+            logger.debug(f"URL pattern indicates a product page: {url}")
+            return False
+
+        # If we have a product title and price, it's likely a product page
+        if '<h1' in html and ('data-qaid="product_price"' in html or 'itemprop="price"' in html):
+            logger.debug(f"Page has product title and price: {url}")
+            return False
+
+        # By default, assume it's a product page
+        return False
+
     async def extract_product_data(
         self, html: str, url: str
     ) -> Optional[Product]:
@@ -89,6 +126,11 @@ class ProductCrawler:
         Returns:
             Product object with extracted data, or None if extraction failed
         """
+        # First, validate that this is actually a product page
+        if self.is_non_product_page(html, url):
+            logger.warning(f"Skipping non-product page: {url}")
+            return None
+
         # Extract JSON-LD data
         jsonld_data = await self.extract_jsonld_data(html)
         if not jsonld_data:
@@ -218,6 +260,17 @@ class ProductCrawler:
             seller = offers.get("seller", {})
             if isinstance(seller, dict):
                 seller_name = seller.get("name")
+                # Try to extract seller URL from JSON-LD
+                seller_url = seller.get("url")
+                if seller_url:
+                    logger.debug(f"Extracted seller URL from JSON-LD: {seller_url}")
+                    # Make sure it's an absolute URL
+                    if not seller_url.startswith('http'):
+                        if seller_url.startswith('/'):
+                            seller_url = f"https://prom.ua{seller_url}"
+                        else:
+                            seller_url = f"https://prom.ua/{seller_url}"
+                        logger.debug(f"Converted to absolute URL: {seller_url}")
 
         # Extract availability status as a boolean
         in_stock = None
@@ -284,17 +337,25 @@ class ProductCrawler:
             # Extract prices
             # Look for current price in various formats
             current_price_patterns = [
-                r'data-qaid="product_price"[^>]*>([\d\s,.]+)</span>',  # Standard price
-                r'class="[^"]*ProductPrice[^"]*"[^>]*>([\d\s,.]+)</span>',  # Alternative
-                r'itemprop="price"[^>]*content="([\d.]+)"',  # Microdata format
+                r'data-qaid="product_price"[^>]*>([\d\s,.]+)[^<]*</span>',  # Standard price
+                r'data-qaid="product_price"[^>]*>.*?<span[^>]*>([\d\s,.]+)[^<]*</span>',  # Nested span
+                r'class="[^"]*ProductPrice[^"]*"[^>]*>([\d\s,.]+)[^<]*</span>',  # Alternative
+                r'class="[^"]*ProductPrice[^"]*"[^>]*>.*?<span[^>]*>([\d\s,.]+)[^<]*</span>',  # Nested span
+                r'itemprop="price"[^>]*content="([\d.,]+)"',  # Microdata format
+                r'<div[^>]*class="[^"]*price[^"]*"[^>]*>([\d\s,.]+)[^<]*</div>',  # Generic price div
             ]
 
             # Look for regular price (often shown as crossed-out)
             regular_price_patterns = [
-                r'data-qaid="product_old_price"[^>]*>([\d\s,.]+)</span>',  # Old price
-                r'class="[^"]*OldPrice[^"]*"[^>]*>([\d\s,.]+)</span>',  # Alternative
-                r'class="[^"]*crossed[^"]*"[^>]*>([\d\s,.]+)</span>',  # Crossed out
+                r'data-qaid="old_price"[^>]*>([\d\s,.]+)[^<]*</span>',  # Old price (exact match from example)
+                r'data-qaid="product_old_price"[^>]*>([\d\s,.]+)[^<]*</span>',  # Old price
+                r'class="[^"]*OldPrice[^"]*"[^>]*>([\d\s,.]+)[^<]*</span>',  # Alternative
+                r'class="[^"]*crossed[^"]*"[^>]*>([\d\s,.]+)[^<]*</span>',  # Crossed out
+                r'<span[^>]*style="[^"]*text-decoration:\s*line-through[^"]*"[^>]*>([\d\s,.]+)[^<]*</span>',  # Styled as crossed-out
             ]
+
+            # Save HTML snippets for debugging
+            price_html_snippets = []
 
             # Extract current price
             current_price = None
@@ -302,12 +363,20 @@ class ProductCrawler:
                 price_match = re.search(pattern, html)
                 if price_match:
                     price_str = price_match.group(1).strip()
+                    # Save the HTML snippet for debugging
+                    match_start = max(0, price_match.start() - 50)
+                    match_end = min(len(html), price_match.end() + 50)
+                    snippet = html[match_start:match_end]
+                    price_html_snippets.append(f"Current price pattern: {pattern}\nMatch: {price_str}\nSnippet: {snippet}")
+
                     # Clean up price string
                     price_str = price_str.replace(' ', '').replace(',', '.')
                     try:
                         current_price = float(price_str)
+                        logger.debug(f"Extracted current price: {current_price} from pattern: {pattern}")
                         break
                     except ValueError:
+                        logger.debug(f"Failed to convert price string to float: {price_str}")
                         continue
 
             # Extract regular price
@@ -316,22 +385,60 @@ class ProductCrawler:
                 price_match = re.search(pattern, html)
                 if price_match:
                     price_str = price_match.group(1).strip()
+                    # Save the HTML snippet for debugging
+                    match_start = max(0, price_match.start() - 50)
+                    match_end = min(len(html), price_match.end() + 50)
+                    snippet = html[match_start:match_end]
+                    price_html_snippets.append(f"Regular price pattern: {pattern}\nMatch: {price_str}\nSnippet: {snippet}")
+
                     # Clean up price string
                     price_str = price_str.replace(' ', '').replace(',', '.')
                     try:
                         regular_price = float(price_str)
+                        logger.debug(f"Extracted regular price: {regular_price} from pattern: {pattern}")
                         break
                     except ValueError:
+                        logger.debug(f"Failed to convert price string to float: {price_str}")
                         continue
 
-            # If we have current_price but not regular_price, use current_price as regular_price
-            if regular_price is None and current_price is not None:
+            # Save price HTML snippets to a file for debugging
+            if price_html_snippets:
+                product_id = url.split('/')[-1].split('-')[0] if '/' in url else 'unknown'
+                debug_file = f"debug_product_{product_id}.html"
+                with open(debug_file, 'w', encoding='utf-8') as f:
+                    f.write("<html><body>\n")
+                    f.write(f"<h1>Debug info for {url}</h1>\n")
+                    f.write("<h2>Price HTML Snippets</h2>\n")
+                    for i, snippet in enumerate(price_html_snippets):
+                        f.write(f"<div style='margin-bottom: 20px; border: 1px solid #ccc; padding: 10px;'>\n")
+                        f.write(f"<pre>{snippet}</pre>\n")
+                        f.write("</div>\n")
+                    f.write("</body></html>")
+                logger.debug(f"Saved price HTML snippets to {debug_file}")
+
+            # Determine discounted price
+            discounted_price = None
+
+            # If we have both prices and regular > current, then current is the discounted price
+            if regular_price is not None and current_price is not None:
+                if regular_price > current_price:
+                    discounted_price = current_price
+                    logger.debug(f"Detected discount: regular={regular_price}, discounted={discounted_price}")
+                else:
+                    # If regular <= current, something might be wrong with our extraction
+                    # In this case, assume no discount
+                    logger.debug(f"Regular price ({regular_price}) <= current price ({current_price}), assuming no discount")
+                    regular_price = current_price
+                    discounted_price = None
+            # If we only have current_price, use it as regular_price
+            elif regular_price is None and current_price is not None:
+                logger.debug(f"Only current price ({current_price}) found, using as regular price")
                 regular_price = current_price
                 discounted_price = None
-            # If we have both, current_price is the discounted price
-            elif regular_price is not None and current_price is not None and regular_price > current_price:
-                discounted_price = current_price
-            else:
+            # If we only have regular_price, use it as current_price too
+            elif regular_price is not None and current_price is None:
+                logger.debug(f"Only regular price ({regular_price}) found, using as current price")
+                current_price = regular_price
                 discounted_price = None
 
             # Extract image URL
@@ -353,7 +460,8 @@ class ProductCrawler:
             seller_name = None
             seller_url = None
             seller_patterns = [
-                r'data-qaid="company_name"[^>]*>(.*?)</span>',  # Company name
+                r'data-qaid="company_name"[^>]*>(.*?)</span>',  # Company name with span
+                r'data-qaid="company_name"[^>]*>(.*?)</div>',   # Company name with div
                 r'itemprop="name"[^>]*>(.*?)</span>',  # Microdata name
             ]
 
@@ -363,17 +471,42 @@ class ProductCrawler:
                     seller_name = seller_match.group(1).strip()
                     # Clean up seller name (remove HTML tags)
                     seller_name = re.sub(r'<[^>]+>', '', seller_name)
+                    logger.debug(f"Found seller name: {seller_name} with pattern: {pattern}")
                     break
+
+            if not seller_name:
+                logger.warning("Could not extract seller name from HTML")
 
             # Extract seller URL
             if seller_name:
-                seller_url_pattern = r'<a[^>]+href="([^"]+)"[^>]*>[^<]*' + re.escape(seller_name)
-                seller_url_match = re.search(seller_url_pattern, html)
-                if seller_url_match:
-                    seller_url = seller_url_match.group(1).strip()
-                    # Make sure it's an absolute URL
-                    if not seller_url.startswith('http'):
-                        seller_url = f"https://prom.ua{seller_url}"
+                # Try multiple patterns to find seller URL
+                seller_url_patterns = [
+                    # Pattern for data-qaid="company_link" containing an anchor with the seller name
+                    r'data-qaid="company_link"[^>]*>.*?<a[^>]+href="([^"]+)"[^>]*>[^<]*' + re.escape(seller_name),
+                    # Pattern for any anchor containing the seller name
+                    r'<a[^>]+href="([^"]+)"[^>]*>[^<]*' + re.escape(seller_name),
+                    # Pattern for company_link with any text
+                    r'data-qaid="company_link"[^>]*>.*?<a[^>]+href="([^"]+)"',
+                    # Pattern for seller profile link
+                    r'<a[^>]+href="([^"]+)"[^>]*data-qaid="company_profile_link"',
+                ]
+
+                for pattern in seller_url_patterns:
+                    seller_url_match = re.search(pattern, html)
+                    if seller_url_match:
+                        seller_url = seller_url_match.group(1).strip()
+                        # Make sure it's an absolute URL
+                        if not seller_url.startswith('http'):
+                            if seller_url.startswith('/'):
+                                seller_url = f"https://prom.ua{seller_url}"
+                            else:
+                                seller_url = f"https://prom.ua/{seller_url}"
+                        logger.debug(f"Found seller URL: {seller_url}")
+                        break
+
+                # Log if we couldn't find a seller URL
+                if not seller_url:
+                    logger.warning(f"Could not extract seller URL for seller: {seller_name}")
 
             # Extract availability status as a boolean
             in_stock = None

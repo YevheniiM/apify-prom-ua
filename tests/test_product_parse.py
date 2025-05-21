@@ -4,6 +4,7 @@ Tests for product data extraction functionality.
 
 import pytest
 import json
+import re
 from unittest.mock import patch, MagicMock
 
 from src.crawlers.product_crawler import ProductCrawler
@@ -156,3 +157,100 @@ async def test_process_product_page(product_crawler):
         assert isinstance(product, Product)
         assert product.title == "Test Product Name"
         assert product.price_uah == 199.99
+
+
+# Sample HTML with seller information
+SAMPLE_HTML_WITH_SELLER = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Product with Seller</title>
+</head>
+<body>
+    <h1>Product with Seller</h1>
+    <div class="product-info">
+        <span data-qaid="product_price">299.99</span>
+        <h1>Product with Seller</h1>
+        <div data-qaid="company_name">Test Seller Company</div>
+        <div data-qaid="company_link">
+            <a href="/ua/companies/test-seller-company">Test Seller Company</a>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+# Sample HTML with seller information but relative URL
+SAMPLE_HTML_WITH_SELLER_RELATIVE_URL = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Product with Seller (Relative URL)</title>
+</head>
+<body>
+    <h1>Product with Seller</h1>
+    <div class="product-info">
+        <span data-qaid="product_price">299.99</span>
+        <div data-qaid="company_name">Another Test Seller</div>
+        <a href="companies/another-test-seller" data-qaid="company_profile_link">
+            Visit Seller
+        </a>
+    </div>
+</body>
+</html>
+"""
+
+# Sample HTML with seller information but absolute URL
+SAMPLE_HTML_WITH_SELLER_ABSOLUTE_URL = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Product with Seller (Absolute URL)</title>
+</head>
+<body>
+    <h1>Product with Seller</h1>
+    <div class="product-info">
+        <span data-qaid="product_price">299.99</span>
+        <div data-qaid="company_name">Third Test Seller</div>
+        <div data-qaid="company_link">
+            <a href="https://prom.ua/ua/companies/third-test-seller">Third Test Seller</a>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+
+@pytest.mark.asyncio
+async def test_seller_url_extraction(product_crawler):
+    """Test extracting seller URL from HTML."""
+    # Test with standard seller URL format
+    with patch.object(product_crawler, 'extract_jsonld_data', return_value=None):
+        product = await product_crawler.extract_product_data(
+            SAMPLE_HTML_WITH_SELLER, "https://example.com/product-seller"
+        )
+
+        assert product.seller_name == "Test Seller Company"
+        assert product.seller_url == "https://prom.ua/ua/companies/test-seller-company"
+
+    # Test with relative URL
+    with patch.object(product_crawler, 'extract_jsonld_data', return_value=None):
+        product = await product_crawler.extract_product_data(
+            SAMPLE_HTML_WITH_SELLER_RELATIVE_URL, "https://example.com/product-relative"
+        )
+
+        assert product.seller_name == "Another Test Seller"
+        assert product.seller_url is not None
+        assert product.seller_url.startswith("https://prom.ua")
+
+    # Test with absolute URL
+    with patch.object(product_crawler, 'extract_jsonld_data', return_value=None):
+        product = await product_crawler.extract_product_data(
+            SAMPLE_HTML_WITH_SELLER_ABSOLUTE_URL, "https://example.com/product-absolute"
+        )
+
+        assert product.seller_name == "Third Test Seller"
+        assert product.seller_url == "https://prom.ua/ua/companies/third-test-seller"
+
+
+# End of file
