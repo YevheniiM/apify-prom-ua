@@ -5,13 +5,11 @@ This module handles crawling product pages and extracting product data.
 """
 
 import re
-import json
-from typing import Dict, Any, Optional
+from typing import Optional
 
 import httpx
 from loguru import logger
 
-from src.config import JSONLD_REGEX
 from src.utils.http import fetch_html
 from src.models.product import Product
 
@@ -33,48 +31,6 @@ class ProductCrawler:
         """
         self.client = client
         self.session_id = session_id
-        self.jsonld_pattern = re.compile(JSONLD_REGEX, re.DOTALL)
-
-    async def extract_jsonld_data(self, html: str) -> Optional[Dict[str, Any]]:
-        """
-        Extract JSON-LD data from product page HTML.
-
-        Args:
-            html: The HTML content of the product page
-
-        Returns:
-            Extracted JSON-LD data as a dictionary, or None if not found
-        """
-        # Find JSON-LD script with Product type
-        # Look for any script tag with type="application/ld+json"
-        script_pattern = re.compile(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', re.DOTALL)
-        scripts = script_pattern.findall(html)
-
-        for script_content in scripts:
-            try:
-                # Parse JSON data
-                data = json.loads(script_content)
-
-                # Handle both single object and array of objects
-                if isinstance(data, list):
-                    # If it's an array, find the first Product object
-                    for item in data:
-                        if isinstance(item, dict) and item.get("@type") == "Product":
-                            logger.debug("Found Product in JSON-LD array")
-                            return item
-                elif isinstance(data, dict):
-                    # If it's a single object and it's a Product
-                    if data.get("@type") == "Product":
-                        logger.debug("Found Product in JSON-LD object")
-                        return data
-
-            except json.JSONDecodeError as e:
-                logger.warning(f"Error parsing JSON-LD script: {str(e)}")
-                continue
-
-        # If we get here, no Product data was found
-        logger.warning("No JSON-LD Product data found in HTML")
-        return None
 
     def is_non_product_page(self, html: str, url: str) -> bool:
         """
@@ -121,77 +77,129 @@ class ProductCrawler:
             html: The HTML content of the product page
 
         Returns:
-            Dictionary with current_price, regular_price, and discounted_price
+            Dictionary with regular_price and discounted_price
         """
-        current_price = None
         regular_price = None
         discounted_price = None
 
-        # Look for current price in various formats
-        current_price_patterns = [
-            r'data-qaid="product_price"[^>]*data-qaprice="([\d\s,.]+)"',  # Data attribute
-            r'data-qaid="product_price"[^>]*>([\d\s,.]+)[^<]*</span>',  # Standard price
-            r'data-qaid="product_price"[^>]*>.*?<span[^>]*>([\d\s,.]+)[^<]*</span>',  # Nested
-            r'class="[^"]*ProductPrice[^"]*"[^>]*>([\d\s,.]+)[^<]*</span>',  # Alternative
-            r'itemprop="price"[^>]*content="([\d.,]+)"',  # Microdata format
-        ]
+        # First, try to extract prices from data-qaprice attributes which are most reliable
+        # Look for the current selling price
+        current_price_attr_pattern = r'data-qaid="product_price"[^>]*data-qaprice="([\d\s,.]+)"'
+        current_price_match = re.search(current_price_attr_pattern, html)
 
-        # Look for regular/old price (often shown as crossed-out)
-        regular_price_patterns = [
-            r'data-qaid="old_price"[^>]*data-qaprice="([\d\s,.]+)"',  # Data attribute
-            r'data-qaid="old_price"[^>]*>([\d\s,.]+)[^<]*</span>',  # Old price
-            r'data-qaid="product_old_price"[^>]*>([\d\s,.]+)[^<]*</span>',  # Old price
-            r'class="[^"]*OldPrice[^"]*"[^>]*>([\d\s,.]+)[^<]*</span>',  # Alternative
-            r'class="[^"]*crossed[^"]*"[^>]*>([\d\s,.]+)[^<]*</span>',  # Crossed out
-        ]
+        # Look for the old price (crossed-out price)
+        old_price_attr_pattern = r'data-qaid="old_price"[^>]*data-qaprice="([\d\s,.]+)"'
+        old_price_match = re.search(old_price_attr_pattern, html)
 
-        # Extract current price
-        for pattern in current_price_patterns:
-            price_match = re.search(pattern, html)
-            if price_match:
-                price_str = price_match.group(1).strip()
-                # Clean up price string
-                price_str = price_str.replace(' ', '').replace(',', '.')
-                try:
-                    current_price = float(price_str)
-                    logger.debug(f"Extracted current price from HTML: {current_price}")
-                    break
-                except ValueError:
-                    continue
+        # Process current price from attribute
+        current_price = None
+        if current_price_match:
+            price_str = current_price_match.group(1).strip()
+            price_str = price_str.replace(' ', '').replace(',', '.')
+            try:
+                current_price = float(price_str)
+                logger.debug(f"Extracted current price from data-qaprice attribute: {current_price}")
+            except ValueError:
+                logger.warning(f"Failed to convert current price string to float: {price_str}")
 
-        # Extract regular price
-        for pattern in regular_price_patterns:
-            price_match = re.search(pattern, html)
-            if price_match:
-                price_str = price_match.group(1).strip()
-                # Clean up price string
-                price_str = price_str.replace(' ', '').replace(',', '.')
-                try:
-                    regular_price = float(price_str)
-                    logger.debug(f"Extracted regular price from HTML: {regular_price}")
-                    break
-                except ValueError:
-                    continue
+        # Process old price from attribute
+        old_price = None
+        if old_price_match:
+            price_str = old_price_match.group(1).strip()
+            price_str = price_str.replace(' ', '').replace(',', '.')
+            try:
+                old_price = float(price_str)
+                logger.debug(f"Extracted old price from data-qaprice attribute: {old_price}")
+                # If we have both prices and old price is different from current price,
+                # determine if this is a discount
+                if current_price is not None and abs(old_price - current_price) > 0.01:
+                    # In a normal discount scenario, old_price > current_price
+                    if old_price > current_price:
+                        logger.debug(f"Normal discount: old_price ({old_price}) > current_price ({current_price})")
+                    else:
+                        # In some cases, the old_price might be lower than current_price
+                        # This is not a discount, but we'll still record both prices
+                        logger.debug(f"Unusual price pattern: old_price ({old_price}) < current_price ({current_price})")
+            except ValueError:
+                logger.warning(f"Failed to convert old price string to float: {price_str}")
 
-        # Determine discounted price
-        if regular_price is not None and current_price is not None:
-            if regular_price > current_price:
+        # If we couldn't find prices from attributes, try extracting from HTML content
+        if current_price is None:
+            # Look for current price in various formats
+            current_price_patterns = [
+                r'data-qaid="product_price"[^>]*>([\d\s,.]+)[^<]*</span>',  # Standard price
+                r'data-qaid="product_price"[^>]*>.*?<span[^>]*>([\d\s,.]+)[^<]*</span>',  # Nested
+                r'class="[^"]*ProductPrice[^"]*"[^>]*>([\d\s,.]+)[^<]*</span>',  # Alternative
+                r'itemprop="price"[^>]*content="([\d.,]+)"',  # Microdata format
+            ]
+
+            for pattern in current_price_patterns:
+                price_match = re.search(pattern, html)
+                if price_match:
+                    price_str = price_match.group(1).strip()
+                    price_str = price_str.replace(' ', '').replace(',', '.')
+                    try:
+                        current_price = float(price_str)
+                        logger.debug(f"Extracted current price from HTML content: {current_price}")
+                        break
+                    except ValueError:
+                        continue
+
+        if old_price is None:
+            # Look for old price (often shown as crossed-out)
+            old_price_patterns = [
+                r'data-qaid="old_price"[^>]*>([\d\s,.]+)[^<]*</span>',  # Old price
+                r'data-qaid="product_old_price"[^>]*>([\d\s,.]+)[^<]*</span>',  # Old price
+                r'class="[^"]*OldPrice[^"]*"[^>]*>([\d\s,.]+)[^<]*</span>',  # Alternative
+                r'class="[^"]*crossed[^"]*"[^>]*>([\d\s,.]+)[^<]*</span>',  # Crossed out
+            ]
+
+            for pattern in old_price_patterns:
+                price_match = re.search(pattern, html)
+                if price_match:
+                    price_str = price_match.group(1).strip()
+                    price_str = price_str.replace(' ', '').replace(',', '.')
+                    try:
+                        old_price = float(price_str)
+                        logger.debug(f"Extracted old price from HTML content: {old_price}")
+                        # If we have both prices and old price is higher, it's a discount
+                        if current_price is not None and old_price > current_price:
+                            logger.debug("Discount detected in HTML content")
+                        break
+                    except ValueError:
+                        continue
+
+        # Determine regular and discounted prices based on what we found
+        if old_price is not None and current_price is not None:
+            # We have both old_price and current_price
+            if old_price > current_price:
+                # This is a discount: old_price is regular_price, current_price is discounted_price
+                regular_price = old_price
                 discounted_price = current_price
-                logger.debug(
-                    f"Detected discount from HTML: regular={regular_price}, "
-                    f"discounted={discounted_price}"
-                )
+                logger.debug(f"Product has a discount: regular={regular_price}, discounted={discounted_price}")
             else:
-                # If regular <= current, something might be wrong with our extraction
-                logger.debug(
-                    f"Regular price ({regular_price}) <= current price ({current_price}), "
-                    f"assuming no discount"
-                )
+                # If old_price <= current_price, this is not a discount
+                # Use current_price as regular_price
                 regular_price = current_price
                 discounted_price = None
+                logger.debug(f"No discount: current_price ({current_price}) >= old_price ({old_price})")
+        else:
+            # If we only have current_price, use it as regular_price
+            regular_price = current_price
+            discounted_price = None
+            logger.debug(f"No old price: using current_price ({current_price}) as regular_price")
+
+        # Handle edge cases
+        if regular_price is None and current_price is not None:
+            # If we couldn't determine regular price but have current price, use it as regular price
+            regular_price = current_price
+            logger.debug(f"Using current price as regular price: {regular_price}")
+
+        # Final validation
+        if regular_price is None:
+            logger.warning("Could not extract any price information from HTML")
 
         return {
-            "current_price": current_price,
             "regular_price": regular_price,
             "discounted_price": discounted_price
         }
@@ -214,161 +222,8 @@ class ProductCrawler:
             logger.warning(f"Skipping non-product page: {url}")
             return None
 
-        # Extract JSON-LD data
-        jsonld_data = await self.extract_jsonld_data(html)
-
-        # Also extract price information from HTML to ensure we get both regular and discounted prices
-        html_prices = await self.extract_prices_from_html(html)
-
-        if not jsonld_data:
-            # If JSON-LD extraction fails, try to extract data from HTML directly
-            return await self.extract_data_from_html(html, url)
-
-        # Extract basic product information from JSON-LD
-        title = jsonld_data.get("name")
-
-        # Extract price information from JSON-LD
-        jsonld_price = None
-        currency = None
-
-        # Handle different offer structures
-        offers = jsonld_data.get("offers", {})
-
-        # Case 1: offers is a dictionary
-        if isinstance(offers, dict):
-            jsonld_price = offers.get("price")
-            currency = offers.get("priceCurrency")
-        # Case 2: offers is a list
-        elif isinstance(offers, list) and offers:
-            # Take the first offer
-            first_offer = offers[0]
-            if isinstance(first_offer, dict):
-                jsonld_price = first_offer.get("price")
-                currency = first_offer.get("priceCurrency")
-
-        # Convert JSON-LD price to float if present
-        if jsonld_price is not None:
-            try:
-                if isinstance(jsonld_price, str):
-                    jsonld_price = jsonld_price.replace(',', '.').replace(' ', '')
-                jsonld_price = float(jsonld_price)
-            except (ValueError, TypeError):
-                logger.warning(f"Could not convert JSON-LD price to float: {jsonld_price}")
-                jsonld_price = None
-
-        # Combine JSON-LD and HTML price information
-        html_regular_price = html_prices.get("regular_price")
-        html_current_price = html_prices.get("current_price")
-
-        # For price information, we need to combine JSON-LD and HTML data
-        # First, check if HTML indicates a discount
-        html_has_discount = (
-            html_regular_price is not None and
-            html_current_price is not None and
-            html_regular_price > html_current_price * 1.01  # At least 1% difference
-        )
-
-        # For the regular price, always prioritize JSON-LD data if available
-        # This is the most reliable approach for production use
-        if jsonld_price is not None:
-            # If we have JSON-LD price data, use it as the source of truth for regular price
-            regular_price = jsonld_price
-            logger.debug(f"Using JSON-LD price as regular price: {regular_price}")
-
-            # For discounted price, check if HTML indicates a discount
-            # and the current price is significantly lower than the JSON-LD price
-            if (html_current_price is not None and
-                jsonld_price > html_current_price * 1.01):  # At least 1% difference
-                discounted_price = html_current_price
-                logger.debug(
-                    f"Using HTML current price as discounted price: {discounted_price}"
-                )
-            else:
-                discounted_price = None
-        elif html_has_discount:
-            # If no JSON-LD but HTML shows a discount, use HTML data
-            regular_price = html_regular_price
-            discounted_price = html_current_price
-            logger.debug(
-                f"HTML indicates discount: regular={html_regular_price}, "
-                f"discounted={html_current_price}"
-            )
-        elif html_regular_price is not None:
-            # If no JSON-LD price and no HTML discount, fall back to HTML regular price
-            regular_price = html_regular_price
-            discounted_price = None
-            logger.debug(f"Using HTML regular price: {regular_price}")
-        else:
-            # If neither is available, we have no regular price
-            regular_price = None
-            discounted_price = None
-
-        # Default currency to UAH if not specified
-        if not currency:
-            currency = "UAH"
-
-        # Extract image URL from JSON-LD
-        image_url = None
-        if "image" in jsonld_data:
-            # Handle both string and array image formats
-            image_data = jsonld_data.get("image")
-            if isinstance(image_data, str):
-                image_url = image_data
-            elif isinstance(image_data, list) and image_data:
-                # Take the first image
-                image_url = image_data[0] if isinstance(image_data[0], str) else None
-            elif isinstance(image_data, dict) and "url" in image_data:
-                # Handle ImageObject format
-                image_url = image_data.get("url")
-
-        # Extract seller information from JSON-LD
-        seller_name = None
-        seller_url = None
-        if isinstance(offers, dict) and "seller" in offers:
-            seller = offers.get("seller", {})
-            if isinstance(seller, dict):
-                seller_name = seller.get("name")
-                # Try to extract seller URL from JSON-LD
-                seller_url = seller.get("url")
-                if seller_url and not seller_url.startswith('http'):
-                    if seller_url.startswith('/'):
-                        seller_url = f"https://prom.ua{seller_url}"
-                    else:
-                        seller_url = f"https://prom.ua/{seller_url}"
-
-        # Extract availability status as a boolean from JSON-LD
-        in_stock = None
-        if isinstance(offers, dict) and "availability" in offers:
-            availability = offers.get("availability", "")
-            # Convert schema.org availability to boolean
-            if "InStock" in availability:
-                in_stock = True
-            else:
-                in_stock = False
-
-        # Create and return Product object
-        product = Product(
-            url=url,
-            title=title,
-            regular_price_uah=regular_price,
-            discounted_price_uah=discounted_price,
-            currency=currency,
-            image_url=image_url,
-            seller_name=seller_name,
-            seller_url=seller_url,
-            in_stock=in_stock,
-        )
-
-        logger.info(
-            f"Extracted product: {title} | "
-            f"Regular: {regular_price} | Discounted: {discounted_price} | "
-            f"Image: {image_url} | "
-            f"Seller: {seller_name} | "
-            f"In Stock: {in_stock} | "
-            f"URL: {url}"
-        )
-
-        return product
+        # Extract all product data directly from HTML
+        return await self.extract_data_from_html(html, url)
 
     async def extract_data_from_html(self, html: str, url: str) -> Optional[Product]:
         """
@@ -391,8 +246,48 @@ class ProductCrawler:
             if title:
                 title = re.sub(r'<[^>]+>', '', title)
 
-            # Extract prices
-            # Look for current price in various formats
+            # First, try to extract prices from data-qaprice attributes which are most reliable
+            # Look for the current selling price
+            current_price_attr_pattern = r'data-qaid="product_price"[^>]*data-qaprice="([\d\s,.]+)"'
+            current_price_match = re.search(current_price_attr_pattern, html)
+
+            # Look for the old price (crossed-out price)
+            old_price_attr_pattern = r'data-qaid="old_price"[^>]*data-qaprice="([\d\s,.]+)"'
+            old_price_match = re.search(old_price_attr_pattern, html)
+
+            # Process current price from attribute
+            current_price = None
+            if current_price_match:
+                price_str = current_price_match.group(1).strip()
+                price_str = price_str.replace(' ', '').replace(',', '.')
+                try:
+                    current_price = float(price_str)
+                    logger.debug(f"Extracted current price from data-qaprice attribute: {current_price}")
+                except ValueError:
+                    logger.warning(f"Failed to convert current price string to float: {price_str}")
+
+            # Process old price from attribute
+            old_price = None
+            if old_price_match:
+                price_str = old_price_match.group(1).strip()
+                price_str = price_str.replace(' ', '').replace(',', '.')
+                try:
+                    old_price = float(price_str)
+                    logger.debug(f"Extracted old price from data-qaprice attribute: {old_price}")
+                    # If we have both prices and old price is different from current price,
+                    # determine if this is a discount
+                    if current_price is not None and abs(old_price - current_price) > 0.01:
+                        # In a normal discount scenario, old_price > current_price
+                        if old_price > current_price:
+                            logger.debug(f"Normal discount: old_price ({old_price}) > current_price ({current_price})")
+                        else:
+                            # In some cases, the old_price might be lower than current_price
+                            # This is not a discount, but we'll still record both prices
+                            logger.debug(f"Unusual price pattern: old_price ({old_price}) < current_price ({current_price})")
+                except ValueError:
+                    logger.warning(f"Failed to convert old price string to float: {price_str}")
+
+            # Define patterns for price extraction
             current_price_patterns = [
                 r'data-qaid="product_price"[^>]*>([\d\s,.]+)[^<]*</span>',  # Standard price
                 r'data-qaid="product_price"[^>]*>.*?<span[^>]*>([\d\s,.]+)[^<]*</span>',  # Nested span
@@ -402,7 +297,6 @@ class ProductCrawler:
                 r'<div[^>]*class="[^"]*price[^"]*"[^>]*>([\d\s,.]+)[^<]*</div>',  # Generic price div
             ]
 
-            # Look for regular price (often shown as crossed-out)
             regular_price_patterns = [
                 r'data-qaid="old_price"[^>]*>([\d\s,.]+)[^<]*</span>',  # Old price (exact match from example)
                 r'data-qaid="product_old_price"[^>]*>([\d\s,.]+)[^<]*</span>',  # Old price
@@ -414,27 +308,28 @@ class ProductCrawler:
             # Save HTML snippets for debugging
             price_html_snippets = []
 
-            # Extract current price
-            current_price = None
-            for pattern in current_price_patterns:
-                price_match = re.search(pattern, html)
-                if price_match:
-                    price_str = price_match.group(1).strip()
-                    # Save the HTML snippet for debugging
-                    match_start = max(0, price_match.start() - 50)
-                    match_end = min(len(html), price_match.end() + 50)
-                    snippet = html[match_start:match_end]
-                    price_html_snippets.append(f"Current price pattern: {pattern}\nMatch: {price_str}\nSnippet: {snippet}")
+            # If we couldn't find prices from attributes, try extracting from HTML content
+            if current_price is None:
+                # Extract current price from HTML content
+                for pattern in current_price_patterns:
+                    price_match = re.search(pattern, html)
+                    if price_match:
+                        price_str = price_match.group(1).strip()
+                        # Save the HTML snippet for debugging
+                        match_start = max(0, price_match.start() - 50)
+                        match_end = min(len(html), price_match.end() + 50)
+                        snippet = html[match_start:match_end]
+                        price_html_snippets.append(f"Current price pattern: {pattern}\nMatch: {price_str}\nSnippet: {snippet}")
 
-                    # Clean up price string
-                    price_str = price_str.replace(' ', '').replace(',', '.')
-                    try:
-                        current_price = float(price_str)
-                        logger.debug(f"Extracted current price: {current_price} from pattern: {pattern}")
-                        break
-                    except ValueError:
-                        logger.debug(f"Failed to convert price string to float: {price_str}")
-                        continue
+                        # Clean up price string
+                        price_str = price_str.replace(' ', '').replace(',', '.')
+                        try:
+                            current_price = float(price_str)
+                            logger.debug(f"Extracted current price: {current_price} from pattern: {pattern}")
+                            break
+                        except ValueError:
+                            logger.debug(f"Failed to convert price string to float: {price_str}")
+                            continue
 
             # Extract regular price
             regular_price = None
@@ -458,45 +353,30 @@ class ProductCrawler:
                         logger.debug(f"Failed to convert price string to float: {price_str}")
                         continue
 
-            # Save price HTML snippets to a file for debugging
+            # Log price HTML snippets for debugging at debug level
             if price_html_snippets:
-                product_id = url.split('/')[-1].split('-')[0] if '/' in url else 'unknown'
-                debug_file = f"debug_product_{product_id}.html"
-                with open(debug_file, 'w', encoding='utf-8') as f:
-                    f.write("<html><body>\n")
-                    f.write(f"<h1>Debug info for {url}</h1>\n")
-                    f.write("<h2>Price HTML Snippets</h2>\n")
-                    for i, snippet in enumerate(price_html_snippets):
-                        f.write(f"<div style='margin-bottom: 20px; border: 1px solid #ccc; padding: 10px;'>\n")
-                        f.write(f"<pre>{snippet}</pre>\n")
-                        f.write("</div>\n")
-                    f.write("</body></html>")
-                logger.debug(f"Saved price HTML snippets to {debug_file}")
+                for i, snippet in enumerate(price_html_snippets):
+                    logger.debug(f"Price HTML snippet {i+1}: {snippet[:100]}...")
 
-            # Determine discounted price
-            discounted_price = None
-
-            # If we have both prices and regular > current, then current is the discounted price
-            if regular_price is not None and current_price is not None:
-                if regular_price > current_price:
+            # Determine regular and discounted prices based on what we found
+            if old_price is not None and current_price is not None:
+                # We have both old_price and current_price
+                if old_price > current_price:
+                    # This is a discount: old_price is regular_price, current_price is discounted_price
+                    regular_price = old_price
                     discounted_price = current_price
-                    logger.debug(f"Detected discount: regular={regular_price}, discounted={discounted_price}")
+                    logger.debug(f"Product has a discount: regular={regular_price}, discounted={discounted_price}")
                 else:
-                    # If regular <= current, something might be wrong with our extraction
-                    # In this case, assume no discount
-                    logger.debug(f"Regular price ({regular_price}) <= current price ({current_price}), assuming no discount")
+                    # If old_price <= current_price, this is not a discount
+                    # Use current_price as regular_price
                     regular_price = current_price
                     discounted_price = None
-            # If we only have current_price, use it as regular_price
-            elif regular_price is None and current_price is not None:
-                logger.debug(f"Only current price ({current_price}) found, using as regular price")
+                    logger.debug(f"No discount: current_price ({current_price}) >= old_price ({old_price})")
+            else:
+                # If we only have current_price, use it as regular_price
                 regular_price = current_price
                 discounted_price = None
-            # If we only have regular_price, use it as current_price too
-            elif regular_price is not None and current_price is None:
-                logger.debug(f"Only regular price ({regular_price}) found, using as current price")
-                current_price = regular_price
-                discounted_price = None
+                logger.debug(f"No old price: using current_price ({current_price}) as regular_price")
 
             # Extract image URL
             image_url = None
