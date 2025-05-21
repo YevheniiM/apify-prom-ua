@@ -459,19 +459,37 @@ async def paginate_search_results(
                 except ValueError:
                     price = None
 
-                # Create product object
-                product = Product(
+                # Create a basic product object for reference
+                basic_product = Product(
                     url=url,
                     title=title,
                     price_uah=price,
-                    currency="UAH"
+                    currency="UAH",
+                    position=i + 1  # Add position to track order in search results
                 )
 
-                # Convert to dictionary and add to results
-                product_data = product.to_dict()
-                all_products.append(product_data)
+                # Use ProductCrawler to get detailed product information
+                product_crawler = ProductCrawler(client)
+                detailed_product = await product_crawler.process_product_page(url)
 
-                # Push data to the dataset
+                # If detailed extraction failed, use the basic product
+                if not detailed_product:
+                    logger.warning(f"Detailed extraction failed for {url}, using basic data")
+                    product_data = basic_product.to_dict()
+                else:
+                    # Add position to the detailed product
+                    detailed_product.position = i + 1
+                    product_data = detailed_product.to_dict()
+                    logger.info(
+                        f"Detailed product: {detailed_product.title} | "
+                        f"Regular: {detailed_product.regular_price_uah} | "
+                        f"Discounted: {detailed_product.discounted_price_uah} | "
+                        f"Image: {detailed_product.image_url} | "
+                        f"Position: {detailed_product.position}"
+                    )
+
+                # Add to results and push to dataset
+                all_products.append(product_data)
                 await Actor.push_data(product_data)
 
                 logger.info(f"Processed product: {title} - {price} UAH")

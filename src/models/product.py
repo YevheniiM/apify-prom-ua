@@ -20,6 +20,10 @@ class Product(BaseModel):
         price_uah: The current price in Ukrainian hryvnia (UAH) - kept for backward compatibility
         currency: The currency code (usually UAH)
         image_url: The URL of the main product image
+        seller_name: The name of the seller/company
+        seller_url: The URL of the seller's page
+        availability_status: The availability status of the product
+        position: The position of the product in search results
     """
 
     url: str = Field(..., description="Product page URL")
@@ -29,6 +33,10 @@ class Product(BaseModel):
     price_uah: Optional[float] = Field(None, description="Current price in UAH (for backward compatibility)")
     currency: Optional[str] = Field(None, description="Currency code (usually UAH)")
     image_url: Optional[str] = Field(None, description="URL of the main product image")
+    seller_name: Optional[str] = Field(None, description="Name of the seller/company")
+    seller_url: Optional[str] = Field(None, description="URL of the seller's page")
+    availability_status: Optional[str] = Field(None, description="Availability status of the product")
+    position: Optional[int] = Field(None, description="Position in search results")
 
     # Model configuration
     model_config = ConfigDict(

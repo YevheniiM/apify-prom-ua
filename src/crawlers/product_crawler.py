@@ -210,6 +210,29 @@ class ProductCrawler:
                 # Handle ImageObject format
                 image_url = image_data.get("url")
 
+        # Extract seller information
+        seller_name = None
+        seller_url = None
+        offers = jsonld_data.get("offers", {})
+        if isinstance(offers, dict) and "seller" in offers:
+            seller = offers.get("seller", {})
+            if isinstance(seller, dict):
+                seller_name = seller.get("name")
+
+        # Extract availability status
+        availability_status = None
+        if isinstance(offers, dict) and "availability" in offers:
+            availability = offers.get("availability", "")
+            # Convert schema.org availability to human-readable format
+            if "InStock" in availability:
+                availability_status = "В наявності"
+            elif "OutOfStock" in availability:
+                availability_status = "Немає в наявності"
+            elif "PreOrder" in availability:
+                availability_status = "Передзамовлення"
+            else:
+                availability_status = availability.split("/")[-1] if "/" in availability else availability
+
         # Create and return Product object
         product = Product(
             url=url,
@@ -219,13 +242,19 @@ class ProductCrawler:
             discounted_price_uah=discounted_price,
             currency=currency,
             image_url=image_url,
+            seller_name=seller_name,
+            seller_url=seller_url,
+            availability_status=availability_status,
         )
 
         logger.info(
             f"Extracted product: {title} | "
             f"Price: {current_price} {currency} | "
             f"Regular: {regular_price} | Discounted: {discounted_price} | "
-            f"Image: {image_url} | URL: {url}"
+            f"Image: {image_url} | "
+            f"Seller: {seller_name} | "
+            f"Availability: {availability_status} | "
+            f"URL: {url}"
         )
 
         return product
@@ -319,6 +348,48 @@ class ProductCrawler:
                     image_url = image_match.group(1).strip()
                     break
 
+            # Extract seller information
+            seller_name = None
+            seller_url = None
+            seller_patterns = [
+                r'data-qaid="company_name"[^>]*>(.*?)</span>',  # Company name
+                r'itemprop="name"[^>]*>(.*?)</span>',  # Microdata name
+            ]
+
+            for pattern in seller_patterns:
+                seller_match = re.search(pattern, html)
+                if seller_match:
+                    seller_name = seller_match.group(1).strip()
+                    # Clean up seller name (remove HTML tags)
+                    seller_name = re.sub(r'<[^>]+>', '', seller_name)
+                    break
+
+            # Extract seller URL
+            if seller_name:
+                seller_url_pattern = r'<a[^>]+href="([^"]+)"[^>]*>[^<]*' + re.escape(seller_name)
+                seller_url_match = re.search(seller_url_pattern, html)
+                if seller_url_match:
+                    seller_url = seller_url_match.group(1).strip()
+                    # Make sure it's an absolute URL
+                    if not seller_url.startswith('http'):
+                        seller_url = f"https://prom.ua{seller_url}"
+
+            # Extract availability status
+            availability_status = None
+            availability_patterns = [
+                r'data-qaid="product_presence"[^>]*>(.*?)</span>',  # Standard format
+                r'class="[^"]*ProductPresence[^"]*"[^>]*>(.*?)</span>',  # Alternative
+                r'itemprop="availability"[^>]*content="([^"]+)"',  # Microdata
+            ]
+
+            for pattern in availability_patterns:
+                availability_match = re.search(pattern, html)
+                if availability_match:
+                    availability_status = availability_match.group(1).strip()
+                    # Clean up availability status (remove HTML tags)
+                    availability_status = re.sub(r'<[^>]+>', '', availability_status)
+                    break
+
             # If we couldn't extract the data, return None
             if not title and not current_price:
                 logger.warning(f"Could not extract product data from HTML: {url}")
@@ -333,13 +404,19 @@ class ProductCrawler:
                 discounted_price_uah=discounted_price,
                 currency="UAH",  # Default currency for Prom.ua
                 image_url=image_url,
+                seller_name=seller_name,
+                seller_url=seller_url,
+                availability_status=availability_status,
             )
 
             logger.info(
                 f"Extracted product from HTML: {title} | "
                 f"Price: {current_price} UAH | "
                 f"Regular: {regular_price} | Discounted: {discounted_price} | "
-                f"Image: {image_url} | URL: {url}"
+                f"Image: {image_url} | "
+                f"Seller: {seller_name} | "
+                f"Availability: {availability_status} | "
+                f"URL: {url}"
             )
 
             return product
