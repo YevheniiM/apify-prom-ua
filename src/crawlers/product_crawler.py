@@ -219,19 +219,20 @@ class ProductCrawler:
             if isinstance(seller, dict):
                 seller_name = seller.get("name")
 
-        # Extract availability status
-        availability_status = None
+        # Extract availability status as a boolean
+        in_stock = None
         if isinstance(offers, dict) and "availability" in offers:
             availability = offers.get("availability", "")
-            # Convert schema.org availability to human-readable format
+            # Convert schema.org availability to boolean
             if "InStock" in availability:
-                availability_status = "В наявності"
+                in_stock = True
             elif "OutOfStock" in availability:
-                availability_status = "Немає в наявності"
+                in_stock = False
             elif "PreOrder" in availability:
-                availability_status = "Передзамовлення"
+                in_stock = False  # PreOrder means not currently in stock
             else:
-                availability_status = availability.split("/")[-1] if "/" in availability else availability
+                # Default to False for unknown availability
+                in_stock = False
 
         # Create and return Product object
         product = Product(
@@ -244,7 +245,7 @@ class ProductCrawler:
             image_url=image_url,
             seller_name=seller_name,
             seller_url=seller_url,
-            availability_status=availability_status,
+            in_stock=in_stock,
         )
 
         logger.info(
@@ -253,7 +254,7 @@ class ProductCrawler:
             f"Regular: {regular_price} | Discounted: {discounted_price} | "
             f"Image: {image_url} | "
             f"Seller: {seller_name} | "
-            f"Availability: {availability_status} | "
+            f"In Stock: {in_stock} | "
             f"URL: {url}"
         )
 
@@ -374,8 +375,8 @@ class ProductCrawler:
                     if not seller_url.startswith('http'):
                         seller_url = f"https://prom.ua{seller_url}"
 
-            # Extract availability status
-            availability_status = None
+            # Extract availability status as a boolean
+            in_stock = None
             availability_patterns = [
                 r'data-qaid="product_presence"[^>]*>(.*?)</span>',  # Standard format
                 r'class="[^"]*ProductPresence[^"]*"[^>]*>(.*?)</span>',  # Alternative
@@ -385,10 +386,20 @@ class ProductCrawler:
             for pattern in availability_patterns:
                 availability_match = re.search(pattern, html)
                 if availability_match:
-                    availability_status = availability_match.group(1).strip()
+                    availability_text = availability_match.group(1).strip()
                     # Clean up availability status (remove HTML tags)
-                    availability_status = re.sub(r'<[^>]+>', '', availability_status)
+                    availability_text = re.sub(r'<[^>]+>', '', availability_text)
+
+                    # Convert to boolean
+                    if "В наявності" in availability_text or "Готово до відправки" in availability_text:
+                        in_stock = True
+                    else:
+                        in_stock = False
                     break
+
+            # Default to False if we couldn't determine availability
+            if in_stock is None:
+                in_stock = False
 
             # If we couldn't extract the data, return None
             if not title and not current_price:
@@ -406,7 +417,7 @@ class ProductCrawler:
                 image_url=image_url,
                 seller_name=seller_name,
                 seller_url=seller_url,
-                availability_status=availability_status,
+                in_stock=in_stock,
             )
 
             logger.info(
@@ -415,7 +426,7 @@ class ProductCrawler:
                 f"Regular: {regular_price} | Discounted: {discounted_price} | "
                 f"Image: {image_url} | "
                 f"Seller: {seller_name} | "
-                f"Availability: {availability_status} | "
+                f"In Stock: {in_stock} | "
                 f"URL: {url}"
             )
 

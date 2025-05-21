@@ -22,7 +22,7 @@ class Product(BaseModel):
         image_url: The URL of the main product image
         seller_name: The name of the seller/company
         seller_url: The URL of the seller's page
-        availability_status: The availability status of the product
+        in_stock: Whether the product is in stock (true) or not (false)
         position: The position of the product in search results
     """
 
@@ -35,7 +35,7 @@ class Product(BaseModel):
     image_url: Optional[str] = Field(None, description="URL of the main product image")
     seller_name: Optional[str] = Field(None, description="Name of the seller/company")
     seller_url: Optional[str] = Field(None, description="URL of the seller's page")
-    availability_status: Optional[str] = Field(None, description="Availability status of the product")
+    in_stock: Optional[bool] = Field(None, description="Whether the product is in stock")
     position: Optional[int] = Field(None, description="Position in search results")
 
     # Model configuration
